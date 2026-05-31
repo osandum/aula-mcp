@@ -41,7 +41,11 @@ import type {
   NextAuthenticatorResponse,
   SrpInitResponse,
 } from './mitid-types.ts';
-import { AUTHENTICATOR_TO_COMBINATION_ID, COMBINATION_ID_TO_AUTHENTICATOR } from './mitid-types.ts';
+import {
+  AUTHENTICATOR_TO_COMBINATION_ID,
+  COMBINATION_ID_TO_AUTHENTICATOR,
+  SERVER_AUTHENTICATOR_TYPE_TO_INTERNAL,
+} from './mitid-types.ts';
 import { mitidUrls } from './mitid-urls.ts';
 import { CustomSrp } from './srp.ts';
 
@@ -636,7 +640,9 @@ export class MitidClient {
   }
 
   private applyNextAuthenticator(next: NextAuthenticator): void {
-    const human = next.authenticatorType as MitidAuthenticatorType;
+    const human =
+      SERVER_AUTHENTICATOR_TYPE_TO_INTERNAL[next.authenticatorType] ??
+      (next.authenticatorType as MitidAuthenticatorType);
     this.currentAuthenticatorType = human;
     this.currentAuthenticatorSessionFlowKey = next.authenticatorSessionFlowKey;
     this.currentAuthenticatorEafeHash = next.eafeHash;

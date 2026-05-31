@@ -23,6 +23,17 @@ export const COMBINATION_ID_TO_AUTHENTICATOR: Readonly<Record<string, MitidAuthe
     S1: 'CODE_TOKEN',
   });
 
+/** MitID server sometimes returns 'TOKEN' for the kodeviser authenticator type
+ *  instead of the canonical 'CODE_TOKEN'. Normalise before storing. */
+export const SERVER_AUTHENTICATOR_TYPE_TO_INTERNAL: Readonly<
+  Record<string, MitidAuthenticatorType>
+> = Object.freeze({
+  APP: 'APP',
+  CODE_TOKEN: 'CODE_TOKEN',
+  TOKEN: 'CODE_TOKEN',
+  PASSWORD: 'PASSWORD',
+});
+
 export const AUTHENTICATOR_TO_COMBINATION_ID: Readonly<Record<MitidAuthenticatorType, string>> =
   Object.freeze({
     APP: 'S3',
