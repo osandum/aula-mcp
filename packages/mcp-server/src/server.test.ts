@@ -769,6 +769,26 @@ describe('MCP server: tools/call(aula.messages.get_attachment)', () => {
     expect(bodyRead).toBe(false);
   });
 
+  test('AULA_MCP_ATTACHMENT_MAX_MB raises the cap', async () => {
+    const previous = setEnv('AULA_MCP_ATTACHMENT_MAX_MB', '100');
+    try {
+      stubFetch(
+        () =>
+          new Response('film', {
+            headers: { 'content-length': String(ATTACHMENT_MAX_BYTES + 1) },
+          }),
+      );
+      const out = await harness.call(33, 'aula.messages.get_attachment', {
+        threadId: 77,
+        attachmentIndex: 0,
+      });
+      // Over the default but under the override, so the download goes through.
+      expect(out.ok).toBe(true);
+    } finally {
+      setEnv('AULA_MCP_ATTACHMENT_MAX_MB', previous);
+    }
+  });
+
   test('attachment_too_large from the actual bytes when content-length is absent', async () => {
     // No content-length header at all — the declared check passes and only
     // the post-download byte count catches it.

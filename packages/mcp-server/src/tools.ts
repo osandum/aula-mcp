@@ -23,6 +23,13 @@ import { buildDiscoverManifest } from './discover.ts';
 
 const ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 
+/** Per-file download cap. Read per call so an archiving run can raise it
+ *  (school films in the gallery run to several hundred MB). */
+function attachmentMaxBytes(): number {
+  const mb = Number(process.env.AULA_MCP_ATTACHMENT_MAX_MB);
+  return Number.isFinite(mb) && mb > 0 ? mb * 1024 * 1024 : ATTACHMENT_MAX_BYTES;
+}
+
 /**
  * Download a CloudFront presigned attachment to a local file and return a
  * result payload. Shared by aula.messages.get_attachment and
@@ -39,6 +46,7 @@ async function downloadAttachmentToDisk(args: {
   prefix: string;
   mediaType?: string;
 }): Promise<Record<string, unknown>> {
+  const maxBytes = attachmentMaxBytes();
   const res = await fetch(args.url);
   if (!res.ok) {
     const body = (await res.text()).slice(0, 300);
@@ -46,23 +54,23 @@ async function downloadAttachmentToDisk(args: {
   }
 
   const declared = Number(res.headers.get('content-length') ?? '0');
-  if (declared > ATTACHMENT_MAX_BYTES) {
+  if (declared > maxBytes) {
     return {
       error: 'attachment_too_large',
       filename: args.filename,
       bytes: declared,
-      maxBytes: ATTACHMENT_MAX_BYTES,
+      maxBytes,
     };
   }
 
   // content-length is advisory — re-check against what actually arrived.
   const buf = Buffer.from(await res.arrayBuffer());
-  if (buf.byteLength > ATTACHMENT_MAX_BYTES) {
+  if (buf.byteLength > maxBytes) {
     return {
       error: 'attachment_too_large',
       filename: args.filename,
       bytes: buf.byteLength,
-      maxBytes: ATTACHMENT_MAX_BYTES,
+      maxBytes,
     };
   }
 
