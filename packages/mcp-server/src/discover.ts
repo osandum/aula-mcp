@@ -281,6 +281,15 @@ function buildCapabilities(
         'Omit profileIds on aula.posts.list — the default covers every institution ' +
         'the family belongs to, and is the only way club posts appear.',
     },
+    gallery: {
+      summary:
+        'Photo/video albums (galleri). List albums, page through an album, and ' +
+        'download media to local files.',
+      tools: ['aula.gallery.albums', 'aula.gallery.media', 'aula.gallery.download'],
+      notes:
+        'Omit albumId on aula.gallery.media / aula.gallery.download for ' +
+        '"Medier af dig og dine børn" — media the family is tagged on.',
+    },
     ugeplan: {
       summary:
         ugeplanDetected.length > 0

@@ -589,3 +589,64 @@ describe('AulaClient.getPosts', () => {
     expect(http.requested.at(-1)?.url).toContain('isUnread=true');
   });
 });
+
+describe('AulaClient gallery', () => {
+  test('getAlbums establishes the profile context first', async () => {
+    // Without it the gallery answers 403 (code 10 / subCode 23), same as POSTs.
+    const http = new FakeHttp();
+    http.enqueue(
+      { status: 200, body: envelope({}) }, // version probe
+      { status: 200, body: envelope({}) }, // profile-context bootstrap
+      { status: 200, body: envelope([{ id: null, title: 'Medier af dig og dine børn' }]) },
+    );
+    const c = makeClient(http);
+
+    const albums = await c.getAlbums({ limit: 5, institutionProfileIds: [8001, 9001] });
+
+    expect(albums).toEqual([{ id: null, title: 'Medier af dig og dine børn' }]);
+    expect(http.requested[1]?.url).toContain('method=profiles.getProfileContext');
+    const url = http.requested[2]?.url ?? '';
+    expect(url).toContain('method=gallery.getAlbums');
+    expect(url).toContain('limit=5');
+    expect(url).toContain('index=0');
+    // Unscoped, Aula returns only the synthetic tagged album.
+    expect(url).toContain('filterInstProfileIds%5B%5D=8001');
+    expect(url).toContain('filterInstProfileIds%5B%5D=9001');
+  });
+
+  test('getGalleryMedia with albumId asks for that album only', async () => {
+    const http = new FakeHttp();
+    http.enqueue(
+      { status: 200, body: envelope({}) },
+      { status: 200, body: envelope({}) },
+      { status: 200, body: envelope({ results: [], totalSize: 0 }) },
+    );
+    const c = makeClient(http);
+
+    await c.getGalleryMedia({ albumId: 4423368, institutionProfileIds: [1] });
+
+    const url = http.requested.at(-1)?.url ?? '';
+    expect(url).toContain('method=gallery.getMedia');
+    expect(url).toContain('albumId=4423368');
+    expect(url).not.toContain('userSpecificAlbum');
+    expect(url).not.toContain('filterInstProfileIds');
+  });
+
+  test('getGalleryMedia without albumId reads the tagged album for the given profiles', async () => {
+    const http = new FakeHttp();
+    http.enqueue(
+      { status: 200, body: envelope({}) },
+      { status: 200, body: envelope({}) },
+      { status: 200, body: envelope({ results: [], totalSize: 0 }) },
+    );
+    const c = makeClient(http);
+
+    await c.getGalleryMedia({ institutionProfileIds: [111293, 222] });
+
+    const url = http.requested.at(-1)?.url ?? '';
+    expect(url).not.toContain('albumId');
+    expect(url).toContain('userSpecificAlbum=true');
+    expect(url).toContain('filterInstProfileIds%5B%5D=111293');
+    expect(url).toContain('filterInstProfileIds%5B%5D=222');
+  });
+});

@@ -79,7 +79,25 @@ const THREADS: Record<number, Array<{ attachments?: FakeAttachment[] }>> = {
   ],
 };
 
+function fakeMedia(id: number, name = `IMG_${id}.jpeg`) {
+  return {
+    id,
+    mediaType: 'image',
+    file: { name, url: `https://cdn.test/media/${id}`, created: '2026-10-09T14:51:07+00:00' },
+    creator: { name: 'Lærer Hansen' },
+    tags: [{ name: 'Emilie' }],
+  };
+}
+
+/** Album 500 is longer than one 50-item page, so downloads must page. */
+const GALLERY: Record<number, ReturnType<typeof fakeMedia>[]> = {
+  500: Array.from({ length: 60 }, (_, i) => fakeMedia(1000 + i)),
+};
+const TAGGED_MEDIA = [fakeMedia(7, 'tagget.jpeg')];
+
 interface FakeOptions {
+  /** Every getGalleryMedia arg object, in call order. */
+  galleryCalls?: unknown[];
   /** Thread id to its messages, for aula.messages.get_attachment. */
   threads?: Record<number, Array<{ attachments?: FakeAttachment[] }>>;
   /** Every presence.updatePresenceTemplate arg object, in call order. */
@@ -133,6 +151,47 @@ function fakeContext(opts: FakeOptions = {}): AulaContext {
     },
     async getMessagesForThread(threadId: number) {
       return { subject: 'Sommerfest', messages: opts.threads?.[threadId] ?? [] };
+    },
+    async rawRequest(method: string) {
+      if (method !== 'consents.getConsentResponses') throw new Error(`unexpected ${method}`);
+      return [
+        { institutionProfile: { id: 8001, role: 'guardian' } },
+        { institutionProfile: { id: 9001, role: 'child' } },
+      ];
+    },
+    async getAlbums(args: { institutionProfileIds?: number[] }) {
+      opts.galleryCalls?.push(args);
+      return [
+        {
+          id: null,
+          title: 'Medier af dig og dine børn',
+          creationDate: '2026-10-10T06:52:30+00:00',
+        },
+        {
+          id: 500,
+          title: 'Motionsdagen',
+          description: 'God efterårsferie!!!',
+          creationDate: '2026-10-09T14:51:05+00:00',
+          creator: { name: 'Lærer Hansen', institutionName: 'Demo Skole' },
+          sharedWithGroups: [{ name: '7.V' }, {}],
+        },
+      ];
+    },
+    async getGalleryMedia(args: {
+      albumId?: number;
+      index?: number;
+      limit?: number;
+      institutionProfileIds?: number[];
+    }) {
+      opts.galleryCalls?.push(args);
+      const all = args.albumId === undefined ? TAGGED_MEDIA : (GALLERY[args.albumId] ?? []);
+      const index = args.index ?? 0;
+      return {
+        album: args.albumId === undefined ? null : { id: args.albumId, title: 'Motionsdagen' },
+        // Aula's totalSize is a lookahead capped at index + limit + 1.
+        totalSize: Math.min(all.length, index + (args.limit ?? 50) + 1),
+        results: all.slice(index, index + (args.limit ?? 50)),
+      };
     },
   };
   return {
@@ -306,9 +365,10 @@ function setEnv(key: string, value: string | undefined): string | undefined {
 }
 
 let harness: Harness;
+const galleryCalls: unknown[] = [];
 
 beforeAll(async () => {
-  harness = await createHarness(fakeContext({ threads: THREADS }));
+  harness = await createHarness(fakeContext({ threads: THREADS, galleryCalls }));
 });
 
 afterAll(async () => {
@@ -329,6 +389,9 @@ describe('MCP server: tools/list', () => {
     expect(names).toContain('aula.notifications.list');
     expect(names).toContain('aula.posts.list');
     expect(names).toContain('aula.posts.get_attachment');
+    expect(names).toContain('aula.gallery.albums');
+    expect(names).toContain('aula.gallery.media');
+    expect(names).toContain('aula.gallery.download');
     expect(names).toContain('aula.ugeplan.easyiq');
     expect(names).toContain('aula.ugeplan.meebook');
     expect(names).toContain('aula.ugeplan.easyiq_skoleportal');
@@ -783,5 +846,121 @@ describe('MCP server: tools/call(aula.messages.get_attachment)', () => {
     });
     expect(out.error).toBe('download_failed');
     expect(out.httpStatus).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// aula.gallery.*
+// ---------------------------------------------------------------------------
+
+describe('MCP server: aula.gallery.*', () => {
+  let dir: string;
+  let previousDir: string | undefined;
+  let realFetch: typeof globalThis.fetch;
+  let requested: string[] = [];
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'aula-mcp-gallery-'));
+    previousDir = setEnv('AULA_MCP_ATTACHMENTS_DIR', dir);
+    realFetch = globalThis.fetch;
+    globalThis.fetch = ((input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      requested.push(url);
+      return Promise.resolve(new Response(`bytes of ${url}`));
+    }) as unknown as typeof globalThis.fetch;
+  });
+
+  afterAll(async () => {
+    globalThis.fetch = realFetch;
+    setEnv('AULA_MCP_ATTACHMENTS_DIR', previousDir);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  afterEach(() => {
+    requested = [];
+    galleryCalls.length = 0;
+  });
+
+  test('albums are slimmed to what a reader needs', async () => {
+    const out = await harness.call(40, 'aula.gallery.albums', {});
+    expect(out.count).toBe(2);
+    const albums = out.albums as Array<Record<string, unknown>>;
+    // The tagged album keeps its null id — that is how callers recognise it.
+    expect(albums[0]).toEqual({
+      id: null,
+      title: 'Medier af dig og dine børn',
+      created: '2026-10-10T06:52:30+00:00',
+    });
+    expect(albums[1]).toEqual({
+      id: 500,
+      title: 'Motionsdagen',
+      description: 'God efterårsferie!!!',
+      created: '2026-10-09T14:51:05+00:00',
+      creator: 'Lærer Hansen',
+      institution: 'Demo Skole',
+      sharedWith: ['7.V'],
+    });
+    expect(galleryCalls).toEqual([{ institutionProfileIds: [8001, 9001] }]);
+  });
+
+  test('media lists items without presigned URLs', async () => {
+    const out = await harness.call(41, 'aula.gallery.media', { albumId: 500, limit: 2 });
+    expect(out.hasMore).toBe(true);
+    expect(out.count).toBe(2);
+    const [first] = out.media as Array<Record<string, unknown>>;
+    expect(first).toEqual({
+      id: 1000,
+      mediaType: 'image',
+      filename: 'IMG_1000.jpeg',
+      created: '2026-10-09T14:51:07+00:00',
+      creator: 'Lærer Hansen',
+      tags: ['Emilie'],
+    });
+    expect(JSON.stringify(out)).not.toContain('cdn.test');
+  });
+
+  test('media without albumId reads the tagged album for the whole family', async () => {
+    const out = await harness.call(42, 'aula.gallery.media', {});
+    expect((out.media as unknown[]).length).toBe(1);
+    expect(out.hasMore).toBe(false);
+    expect(galleryCalls).toEqual([{ institutionProfileIds: [8001, 9001], index: 0, limit: 50 }]);
+  });
+
+  test('download fetches only the requested ids, paging until found', async () => {
+    // 1055 sits on the second page, so the walk must not stop after page one.
+    const out = await harness.call(43, 'aula.gallery.download', {
+      albumId: 500,
+      mediaIds: [1001, 1055, 9999],
+    });
+    expect(out.downloaded).toBe(2);
+    expect(out.failed).toBe(0);
+    expect(out.notFound).toEqual([9999]);
+    expect(requested.sort()).toEqual([
+      'https://cdn.test/media/1001',
+      'https://cdn.test/media/1055',
+    ]);
+    const files = out.files as Array<Record<string, unknown>>;
+    expect(files[0]?.mediaId).toBe(1001);
+    expect(files[0]?.filename).toBe('IMG_1001.jpeg');
+    // mediaId in the prefix keeps same-named photos in one album apart.
+    expect(files[0]?.path).toBe(join(dir, 'gallery-500-1001-IMG_1001.jpeg'));
+    expect(await readFile(files[0]?.path as string, 'utf8')).toBe(
+      'bytes of https://cdn.test/media/1001',
+    );
+  });
+
+  test('download without mediaIds takes the whole album', async () => {
+    const out = await harness.call(44, 'aula.gallery.download', { albumId: 500 });
+    expect(out.downloaded).toBe(60);
+    expect(requested.length).toBe(60);
+    expect('notFound' in out).toBe(false);
+    expect(galleryCalls.length).toBe(2);
+  });
+
+  test('download without albumId uses the tagged album and its own prefix', async () => {
+    const out = await harness.call(45, 'aula.gallery.download', {});
+    const [file] = out.files as Array<Record<string, unknown>>;
+    expect(out.albumId).toBeNull();
+    expect(file?.path).toBe(join(dir, 'gallery-tagged-7-tagget.jpeg'));
   });
 });

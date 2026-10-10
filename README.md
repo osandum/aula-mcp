@@ -294,6 +294,7 @@ Form:
     messages:      { summary, tools: ['aula.messages.list_threads', 'aula.messages.get_thread'] },
     notifications: { summary, tools: ['aula.notifications.list'] },
     posts:         { summary, tools: ['aula.posts.list'] },
+    gallery:       { summary, tools: ['aula.gallery.albums', 'aula.gallery.media', 'aula.gallery.download'] },
     ugeplan:       { summary, tools: ['aula.ugeplan.easyiq'] },          // kun den detekterede vendor
     opgaver:       { summary, tools: ['aula.opgaver.minuddannelse'] },
     ugebrev:       { summary, tools: ['aula.ugebrev.minuddannelse'] },

@@ -8,11 +8,12 @@
  *     mid-session (e.g. server returns 410 and we bump).
  *   - **CSRF token from cookie (`Csrfp-Token`)**: lifted from the cookie jar
  *     and sent as `csrfp-token` header on POSTs.
- *   - **Profile context before POSTs**: Aula answers 403 (envelope code 10 /
- *     subCode 23) on every POST method until `profiles.getProfileContext` has
- *     run on the session — that call selects the acting profile server-side.
- *     The CSRF cookie alone does not satisfy it, so `postJson` establishes the
- *     context once per client before its first POST.
+ *   - **Profile context before POSTs and gallery GETs**: Aula answers 403
+ *     (envelope code 10 / subCode 23) on every POST method, and on the
+ *     gallery.* reads, until `profiles.getProfileContext` has run on the
+ *     session — that call selects the acting profile server-side. The CSRF
+ *     cookie alone does not satisfy it, so `ensureProfileContext` establishes
+ *     the context once per client before the first such call.
  */
 
 import {
@@ -27,7 +28,10 @@ import type {
   AulaEnvelope,
   CalendarEvent,
   DailyOverviewEntry,
+  GalleryAlbum,
+  GalleryMediaPage,
   GetCalendarEventsArgs,
+  GetGalleryMediaArgs,
   GetPostsArgs,
   GetPresenceTemplatesArgs,
   MessageThread,
@@ -368,6 +372,59 @@ export class AulaClient {
   }
 
   /**
+   * `gallery.getAlbums` — newest first. Aula prepends the synthetic
+   * "Medier af dig og dine børn" album (id `null`) to the first page, so
+   * page 0 holds `limit + 1` entries.
+   *
+   * Like POSTs, the gallery answers 403 (code 10 / subCode 23) until
+   * `profiles.getProfileContext` has run on the session. Without
+   * `filterInstProfileIds[]` Aula answers 200 with only the synthetic album,
+   * so an unscoped call looks like an empty gallery.
+   */
+  async getAlbums(
+    opts: { index?: number; limit?: number; institutionProfileIds?: readonly number[] } = {},
+  ): Promise<GalleryAlbum[]> {
+    await this.ensureProfileContext('gallery.getAlbums');
+    const params = new URLSearchParams({
+      method: 'gallery.getAlbums',
+      index: String(opts.index ?? 0),
+      limit: String(opts.limit ?? 12),
+      sortOn: 'createdAt',
+      orderDirection: 'desc',
+      filterBy: 'all',
+    });
+    for (const id of opts.institutionProfileIds ?? []) {
+      params.append('filterInstProfileIds[]', String(id));
+    }
+    return (await this.getJsonRaw<GalleryAlbum[]>(params)) ?? [];
+  }
+
+  /**
+   * `gallery.getMedia` — one page of an album. Without `albumId` it returns
+   * the tagged-media album, which Aula only fills when it is told whose tags
+   * to look for via `filterInstProfileIds[]`.
+   */
+  async getGalleryMedia(opts: GetGalleryMediaArgs): Promise<GalleryMediaPage> {
+    await this.ensureProfileContext('gallery.getMedia');
+    const params = new URLSearchParams({
+      method: 'gallery.getMedia',
+      index: String(opts.index ?? 0),
+      limit: String(opts.limit ?? 50),
+      sortOn: 'uploadedAt',
+      orderDirection: 'desc',
+      filterBy: 'all',
+    });
+    if (opts.albumId !== undefined) params.set('albumId', String(opts.albumId));
+    else {
+      params.set('userSpecificAlbum', 'true');
+      for (const id of opts.institutionProfileIds ?? []) {
+        params.append('filterInstProfileIds[]', String(id));
+      }
+    }
+    return (await this.getJsonRaw<GalleryMediaPage>(params)) ?? {};
+  }
+
+  /**
    * Generic escape hatch for endpoints we haven't typed wrappers for.
    * The MCP server gates this behind AULA_MCP_RAW=1.
    *
@@ -441,12 +498,11 @@ export class AulaClient {
     return this.parseEnvelope<T>(await send(await this.ensureApiVersion()), send);
   }
 
-  /** POST JSON body to an Aula API method. Sets CSRF header from cookie jar. */
-  async postJson<T>(method: string, body: string): Promise<T | undefined> {
-    const version = await this.ensureApiVersion();
-    // Aula rejects every POST method with HTTP 403 (envelope code 10 /
-    // subCode 23) until `profiles.getProfileContext` has run on the session —
-    // it is what selects the acting profile server-side. A process that
+  /** Select the acting profile server-side, once per client. */
+  private async ensureProfileContext(method: string): Promise<void> {
+    // Aula rejects every POST method — and the gallery GETs — with HTTP 403
+    // (envelope code 10 / subCode 23) until `profiles.getProfileContext` has
+    // run on the session; it is what selects the acting profile. A process that
     // restores tokens from the store has never called it, so the first POST
     // of the process fails. The Csrfp-Token cookie is NOT sufficient on its
     // own: `profiles.getProfilesByLogin` sets the cookie and the POST still
@@ -460,8 +516,8 @@ export class AulaClient {
       this.profileContextPromise = this.getProfileContext().then(
         () => undefined,
         (e: unknown) => {
-          // Best-effort: let the POST run and surface Aula's own error rather
-          // than this one, but clear the memo so the next POST retries instead
+          // Best-effort: let the request run and surface Aula's own error rather
+          // than this one, but clear the memo so the next call retries instead
           // of inheriting a bootstrap that never actually happened.
           this.profileContextPromise = undefined;
           this.logger.warn('aula.api.profile_context_bootstrap_failed', {
@@ -472,6 +528,12 @@ export class AulaClient {
       );
     }
     await this.profileContextPromise;
+  }
+
+  /** POST JSON body to an Aula API method. Sets CSRF header from cookie jar. */
+  async postJson<T>(method: string, body: string): Promise<T | undefined> {
+    const version = await this.ensureApiVersion();
+    await this.ensureProfileContext(method);
     const send = async (v: number) => {
       const params = new URLSearchParams({ method, access_token: this.tokens.access_token });
       const url = `${this.apiBaseHost}/api/v${v}/?${params.toString()}`;

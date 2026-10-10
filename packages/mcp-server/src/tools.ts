@@ -6,7 +6,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AulaPost } from '@aula-mcp/aula-client';
+import type { AulaPost, GalleryAlbum, GalleryMediaItem } from '@aula-mcp/aula-client';
 import {
   AulaStepUpRequiredError,
   htmlToText,
@@ -170,6 +170,41 @@ export function slimPost(post: AulaPost) {
     ...(attachments.length ? { attachments } : {}),
   };
 }
+
+/** An album as a reader needs it. Exported for tests. */
+export function slimAlbum(album: GalleryAlbum) {
+  const sharedWith = (album.sharedWithGroups ?? []).flatMap((g) => (g.name ? [g.name] : []));
+  return {
+    // null is the "Medier af dig og dine børn" album — omit albumId to read it.
+    id: album.id,
+    title: album.title,
+    ...(album.description ? { description: album.description } : {}),
+    created: album.creationDate,
+    ...(album.creator?.name ? { creator: album.creator.name } : {}),
+    ...(album.creator?.institutionName ? { institution: album.creator.institutionName } : {}),
+    ...(sharedWith.length ? { sharedWith } : {}),
+  };
+}
+
+/** A media item without its presigned URLs — aula.gallery.download fetches fresh ones. */
+export function slimMedia(item: GalleryMediaItem) {
+  const tags = (item.tags ?? []).flatMap((t) => (t.name ? [t.name] : []));
+  return {
+    id: item.id,
+    mediaType: item.mediaType,
+    filename: item.file?.name,
+    ...(item.title ? { title: item.title } : {}),
+    ...(item.description ? { description: item.description } : {}),
+    created: item.file?.created,
+    ...(item.creator?.name ? { creator: item.creator.name } : {}),
+    ...(tags.length ? { tags } : {}),
+  };
+}
+
+/** Largest page gallery.getMedia is asked for when walking a whole album. */
+const GALLERY_PAGE_SIZE = 50;
+/** Parallel downloads per aula.gallery.download call — polite to the CDN, still quick. */
+const GALLERY_DOWNLOAD_CONCURRENCY = 4;
 
 /** `YYYY-MM-DD`. */
 const ISO_DATE = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
@@ -1088,6 +1123,151 @@ export function registerTools(server: McpServer, context: AulaContext): void {
           prefix: `post-${args.postId}`,
         }),
       );
+    },
+  );
+
+  // --- aula.gallery.* --------------------------------------------------------
+  //
+  // Albums are listed newest first; media are read a page at a time. The
+  // download tool re-reads the album for fresh presigned URLs rather than
+  // taking one from the caller, for the same reason as the attachment tools.
+
+  /** Institution profiles the gallery is scoped to: the whole family. */
+  async function galleryProfileIds(): Promise<number[]> {
+    // consents.getConsentResponses 403s until the guardian profile is active.
+    await context.getGuardianUserId();
+    return resolveFamilyProfileIds(await context.getClient());
+  }
+
+  server.registerTool(
+    'aula.gallery.albums',
+    {
+      title: 'Aula gallery albums',
+      description:
+        'Photo/video albums shared with the family, newest first. The first ' +
+        'page also holds "Medier af dig og dine børn" (id null): media the ' +
+        'family is tagged on. Pass an album id to aula.gallery.media.',
+      inputSchema: {
+        limit: z.number().int().min(1).max(50).optional().describe('Albums per page (default 12).'),
+        index: z.number().int().min(0).optional().describe('Zero-based offset into the list.'),
+      },
+    },
+    async (args) => {
+      const client = await context.getClient();
+      const albums = await client.getAlbums({
+        institutionProfileIds: await galleryProfileIds(),
+        ...(args.index !== undefined ? { index: args.index } : {}),
+        ...(args.limit !== undefined ? { limit: args.limit } : {}),
+      });
+      return jsonContent({ count: albums.length, albums: albums.map(slimAlbum) });
+    },
+  );
+
+  server.registerTool(
+    'aula.gallery.media',
+    {
+      title: 'Media in an Aula gallery album',
+      description:
+        'One page of photos/videos in an album, newest first. Omit albumId ' +
+        'for "Medier af dig og dine børn". Use aula.gallery.download to save ' +
+        'files — this tool returns no URLs.',
+      inputSchema: {
+        albumId: z.number().int().positive().optional(),
+        limit: z.number().int().min(1).max(100).optional().describe('Items per page (default 50).'),
+        index: z.number().int().min(0).optional().describe('Zero-based offset into the album.'),
+      },
+    },
+    async (args) => {
+      const client = await context.getClient();
+      const page = await client.getGalleryMedia({
+        ...(args.albumId !== undefined
+          ? { albumId: args.albumId }
+          : { institutionProfileIds: await galleryProfileIds() }),
+        index: args.index ?? 0,
+        limit: args.limit ?? GALLERY_PAGE_SIZE,
+      });
+      const items = page.results ?? [];
+      const index = args.index ?? 0;
+      return jsonContent({
+        ...(page.album ? { album: slimAlbum(page.album) } : {}),
+        startIndex: index,
+        count: items.length,
+        // totalSize is a lookahead, not the album size: Aula caps it at
+        // index + limit + 1, so it only says whether another page exists.
+        hasMore: (page.totalSize ?? 0) > index + items.length,
+        media: items.map(slimMedia),
+      });
+    },
+  );
+
+  server.registerTool(
+    'aula.gallery.download',
+    {
+      title: 'Download gallery media to local disk',
+      description:
+        'Download photos/videos from an album to local files and return ' +
+        'their paths with the original filenames. Omit albumId for "Medier ' +
+        'af dig og dine børn"; omit mediaIds to download the whole album.',
+      inputSchema: {
+        albumId: z.number().int().positive().optional(),
+        mediaIds: z
+          .array(z.number().int().positive())
+          .min(1)
+          .optional()
+          .describe('Ids from aula.gallery.media. Omit for every item in the album.'),
+      },
+    },
+    async (args) => {
+      const client = await context.getClient();
+      const scope =
+        args.albumId !== undefined
+          ? { albumId: args.albumId }
+          : { institutionProfileIds: await galleryProfileIds() };
+
+      // Walk the album for fresh URLs; stop early once every requested id is found.
+      const wanted = args.mediaIds ? new Set(args.mediaIds) : undefined;
+      const found: GalleryMediaItem[] = [];
+      for (let index = 0; ; index += GALLERY_PAGE_SIZE) {
+        const page = await client.getGalleryMedia({ ...scope, index, limit: GALLERY_PAGE_SIZE });
+        const items = page.results ?? [];
+        found.push(...(wanted ? items.filter((m) => wanted.has(m.id)) : items));
+        if (items.length < GALLERY_PAGE_SIZE) break;
+        if (wanted && found.length === wanted.size) break;
+      }
+
+      const albumKey = args.albumId ?? 'tagged';
+      const results: Array<Record<string, unknown>> = new Array(found.length);
+      let next = 0;
+      const worker = async () => {
+        while (next < found.length) {
+          const i = next++;
+          const item = found[i];
+          if (!item) continue;
+          const url = item.file?.url;
+          results[i] = url
+            ? {
+                mediaId: item.id,
+                ...(await downloadAttachmentToDisk({
+                  url,
+                  filename: item.file?.name ?? `media-${item.id}`,
+                  // mediaId keeps two phones' IMG_0001.jpeg in one album apart.
+                  prefix: `gallery-${albumKey}-${item.id}`,
+                  ...(item.mediaType ? { mediaType: item.mediaType } : {}),
+                })),
+              }
+            : { mediaId: item.id, error: 'no_file_url' };
+        }
+      };
+      await Promise.all(Array.from({ length: GALLERY_DOWNLOAD_CONCURRENCY }, worker));
+
+      const missing = wanted ? [...wanted].filter((id) => !found.some((m) => m.id === id)) : [];
+      return jsonContent({
+        albumId: args.albumId ?? null,
+        downloaded: results.filter((r) => r.ok === true).length,
+        failed: results.filter((r) => r.ok !== true).length,
+        ...(missing.length ? { notFound: missing } : {}),
+        files: results,
+      });
     },
   );
 
