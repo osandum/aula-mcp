@@ -342,6 +342,64 @@ export interface GetPostsArgs {
 }
 
 // --------------------------------------------------------------------------
+// gallery.*
+// --------------------------------------------------------------------------
+
+export interface GalleryCreator {
+  name?: string;
+  institutionName?: string;
+  metadata?: string;
+}
+
+export interface GalleryAlbum {
+  /** `null` on the synthetic "Medier af dig og dine børn" album. */
+  id: number | null;
+  title?: string;
+  description?: string | null;
+  creationDate?: string;
+  creator?: GalleryCreator | null;
+  sharedWithGroups?: Array<{ name?: string }>;
+}
+
+export interface GalleryMediaFile {
+  id?: string;
+  name?: string;
+  url?: string;
+  created?: string;
+}
+
+export interface GalleryMediaItem {
+  id: number;
+  title?: string | null;
+  description?: string | null;
+  /** `image`, `video`, `sound`, … */
+  mediaType?: string;
+  file?: GalleryMediaFile | null;
+  creator?: GalleryCreator | null;
+  tags?: Array<{ name?: string }>;
+}
+
+export interface GalleryMediaPage {
+  album?: GalleryAlbum | null;
+  results?: GalleryMediaItem[];
+  /** Not the album size: Aula caps it at `index + limit + 1`, so it only
+   *  tells whether another page exists. `mediaCount` mirrors it. */
+  totalSize?: number;
+  mediaCount?: number;
+  startIndex?: number;
+  limit?: number;
+}
+
+export interface GetGalleryMediaArgs {
+  /** Omit for the "Medier af dig og dine børn" album (media the family is tagged on). */
+  albumId?: number;
+  index?: number;
+  limit?: number;
+  /** Institution profiles the tagged album is scoped to. Ignored with `albumId`. */
+  institutionProfileIds?: readonly number[];
+}
+
+// --------------------------------------------------------------------------
 // messaging.*
 // --------------------------------------------------------------------------
 

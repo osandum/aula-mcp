@@ -28,7 +28,10 @@ import type {
   AulaEnvelope,
   CalendarEvent,
   DailyOverviewEntry,
+  GalleryAlbum,
+  GalleryMediaPage,
   GetCalendarEventsArgs,
+  GetGalleryMediaArgs,
   GetPostsArgs,
   GetPresenceTemplatesArgs,
   MessageThread,
@@ -64,9 +67,9 @@ export interface AulaClientOptions {
 const DEFAULT_API_BASE_HOST = 'https://www.aula.dk';
 
 /** GET methods that Aula refuses (HTTP 403) until the profile context is set
- *  — see ensureProfileContext. Measured for messaging.*; posts.* and
+ *  — see ensureProfileContext. Measured for messaging.* and gallery.*; posts.* and
  *  notifications.* as reported in upstream #109. */
-const NEEDS_PROFILE_CONTEXT = /^(messaging|posts|notifications)\./;
+const NEEDS_PROFILE_CONTEXT = /^(messaging|posts|notifications|gallery)\./;
 
 export class AulaClient {
   readonly http: AulaHttpClient;
@@ -405,6 +408,57 @@ export class AulaClient {
       params.append('institutionProfileIds[]', String(id));
     }
     return this.getJsonRaw<PostsData>(params);
+  }
+
+  /**
+   * `gallery.getAlbums` — newest first. Aula prepends the synthetic
+   * "Medier af dig og dine børn" album (id `null`) to the first page, so
+   * page 0 holds `limit + 1` entries.
+   *
+   * Like POSTs, the gallery answers 403 (code 10 / subCode 23) until
+   * `profiles.getProfileContext` has run on the session. Without
+   * `filterInstProfileIds[]` Aula answers 200 with only the synthetic album,
+   * so an unscoped call looks like an empty gallery.
+   */
+  async getAlbums(
+    opts: { index?: number; limit?: number; institutionProfileIds?: readonly number[] } = {},
+  ): Promise<GalleryAlbum[]> {
+    const params = new URLSearchParams({
+      method: 'gallery.getAlbums',
+      index: String(opts.index ?? 0),
+      limit: String(opts.limit ?? 12),
+      sortOn: 'createdAt',
+      orderDirection: 'desc',
+      filterBy: 'all',
+    });
+    for (const id of opts.institutionProfileIds ?? []) {
+      params.append('filterInstProfileIds[]', String(id));
+    }
+    return (await this.getJsonRaw<GalleryAlbum[]>(params)) ?? [];
+  }
+
+  /**
+   * `gallery.getMedia` — one page of an album. Without `albumId` it returns
+   * the tagged-media album, which Aula only fills when it is told whose tags
+   * to look for via `filterInstProfileIds[]`.
+   */
+  async getGalleryMedia(opts: GetGalleryMediaArgs): Promise<GalleryMediaPage> {
+    const params = new URLSearchParams({
+      method: 'gallery.getMedia',
+      index: String(opts.index ?? 0),
+      limit: String(opts.limit ?? 50),
+      sortOn: 'uploadedAt',
+      orderDirection: 'desc',
+      filterBy: 'all',
+    });
+    if (opts.albumId !== undefined) params.set('albumId', String(opts.albumId));
+    else {
+      params.set('userSpecificAlbum', 'true');
+      for (const id of opts.institutionProfileIds ?? []) {
+        params.append('filterInstProfileIds[]', String(id));
+      }
+    }
+    return (await this.getJsonRaw<GalleryMediaPage>(params)) ?? {};
   }
 
   /**
