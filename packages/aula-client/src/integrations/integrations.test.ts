@@ -16,6 +16,7 @@ import { EasyIqLektierClient } from './easyiq-lektier.ts';
 import { EasyIqSkoleportalClient } from './easyiq-skoleportal.ts';
 import { MeebookClient } from './meebook.ts';
 import { elevIdFromRedirectUrl, MinUddannelseClient } from './min-uddannelse.ts';
+import { Pay4ItClient } from './pay4it.ts';
 import { SystematicClient } from './systematic.ts';
 import { decodeHtmlEntities, type IntegrationContext, isoWeekString } from './types.ts';
 
@@ -875,5 +876,87 @@ describe('decodeHtmlEntities', () => {
 
   test('leaves unrelated text alone', () => {
     expect(decodeHtmlEntities('hello world')).toBe('hello world');
+  });
+});
+
+// --------------------------------------------------------------------------
+// Pay4It – Klubkort (widget 0134) and Skolemad (widget 0118)
+// --------------------------------------------------------------------------
+
+describe('Pay4ItClient', () => {
+  test('getKlubkort posts the widget token and child userId in the body', async () => {
+    const http = new FakeHttp().enqueue({
+      status: 200,
+      body: JSON.stringify({
+        CanLogin: true,
+        Wallets: [
+          {
+            ID: 1,
+            WalletID: 'W-1',
+            Name: 'Emilie',
+            WalletBalance: 514.5,
+            CreditBalance: 0,
+            NFCAdded: true,
+          },
+        ],
+      }),
+    });
+    const client = new Pay4ItClient({ http: http.asHttpClient(), widgets: fakeWidgets() });
+    const card = await client.getKlubkort(ctx());
+    expect(card.wallets).toEqual([
+      { childName: 'Emilie', walletId: 'W-1', balance: 514.5, credit: 0, cardAdded: true },
+    ]);
+    expect(card.warnings).toBeUndefined();
+    const req = http.requested[0];
+    expect(req?.url).toBe('https://kkapi.pay4it.dk/V2/Wallet/AulaClubInfo');
+    expect(req?.method).toBe('POST');
+    const body = JSON.parse(String(req?.body));
+    expect(body.aulaToken).toBe('TKN-1');
+    expect(body.childs).toEqual(['u1234567']);
+  });
+
+  test('getSkolemad asks from the Monday of isoWeek and sorts the days', async () => {
+    const http = new FakeHttp().enqueue({
+      status: 200,
+      body: JSON.stringify({
+        CanLogin: true,
+        Wallets: [
+          {
+            WalletID: 'W-1',
+            Name: 'Emilie',
+            Dates: {
+              '2026-05-05T00:00:00': ['Pasta med kødsovs'],
+              '2026-05-04T00:00:00': [],
+            },
+          },
+        ],
+      }),
+    });
+    const client = new Pay4ItClient({ http: http.asHttpClient(), widgets: fakeWidgets() });
+    const meals = await client.getSkolemad(ctx());
+    expect(meals.isoWeek).toBe('2026-W19');
+    expect(meals.children[0]?.days).toEqual([
+      { date: '2026-05-04', products: [] },
+      { date: '2026-05-05', products: ['Pasta med kødsovs'] },
+    ]);
+    const req = http.requested[0];
+    expect(req?.url).toBe('https://kkapi.pay4it.dk/V2/Wallet/AulaSchoolInfoV2');
+    expect(JSON.parse(String(req?.body)).date).toBe('2026-05-04T00:00:00');
+  });
+
+  test('empty Wallets yields a warning about the userId', async () => {
+    const http = new FakeHttp().enqueue({ status: 200, body: '{"CanLogin":true,"Wallets":[]}' });
+    const client = new Pay4ItClient({ http: http.asHttpClient(), widgets: fakeWidgets() });
+    const card = await client.getKlubkort(ctx());
+    expect(card.wallets).toEqual([]);
+    expect(card.warnings?.[0]).toContain('userId');
+  });
+
+  test('non-200 throws', async () => {
+    const http = new FakeHttp().enqueue({ status: 500, body: 'boom' });
+    const client = new Pay4ItClient({ http: http.asHttpClient(), widgets: fakeWidgets() });
+    await expect(client.getKlubkort(ctx())).rejects.toThrow(
+      'Pay4It AulaClubInfo failed (status 500)',
+    );
   });
 });

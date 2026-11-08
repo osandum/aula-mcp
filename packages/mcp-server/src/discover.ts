@@ -103,6 +103,9 @@ const WIDGET_PROVIDER_MAP: Readonly<
     provider: 'easyiq_lektier',
     tool: 'aula.lektier.easyiq',
   },
+  // Københavns Kommune only – exposed as capabilities when detected.
+  '0118': { capability: 'skolemad', provider: 'pay4it', tool: 'aula.skolemad.pay4it' },
+  '0134': { capability: 'klubkort', provider: 'pay4it', tool: 'aula.klubkort.pay4it' },
 });
 
 export async function buildDiscoverManifest(context: AulaContext): Promise<DiscoverManifest> {
@@ -200,6 +203,8 @@ function buildCapabilities(
   const ugebrevDetected = detectedByCapability.get('ugebrev') ?? [];
   const huskelistenDetected = detectedByCapability.get('huskelisten') ?? [];
   const lektierDetected = detectedByCapability.get('lektier') ?? [];
+  const skolemadDetected = detectedByCapability.get('skolemad') ?? [];
+  const klubkortDetected = detectedByCapability.get('klubkort') ?? [];
 
   // When detection picked a provider for a third-party capability, expose
   // ONLY that tool. Listing alternates as fallbacks invites Claude to fan
@@ -350,6 +355,24 @@ function buildCapabilities(
           }
         : {}),
     },
+    // Municipality-specific (Pay4It, Københavns Kommune): only listed when the
+    // widget is configured, so other users never see them.
+    ...(klubkortDetected.length > 0
+      ? {
+          klubkort: {
+            summary: 'Club card (Klubkort) balance per child, from Pay4It (widget 0134).',
+            tools: ['aula.klubkort.pay4it'],
+          },
+        }
+      : {}),
+    ...(skolemadDetected.length > 0
+      ? {
+          skolemad: {
+            summary: 'School meal (Skolemad) orders per weekday, from Pay4It (widget 0118).',
+            tools: ['aula.skolemad.pay4it'],
+          },
+        }
+      : {}),
   };
 }
 

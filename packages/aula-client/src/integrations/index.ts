@@ -6,6 +6,15 @@ export {
 } from './easyiq-skoleportal.ts';
 export { MeebookClient, type MeebookOptions } from './meebook.ts';
 export { MinUddannelseClient, type MinUddannelseOptions } from './min-uddannelse.ts';
+export {
+  type Klubkort,
+  type KlubkortWallet,
+  Pay4ItClient,
+  type Pay4ItOptions,
+  type Skolemad,
+  type SkolemadChild,
+  type SkolemadDay,
+} from './pay4it.ts';
 export { SystematicClient, type SystematicOptions } from './systematic.ts';
 export {
   decodeHtmlEntities,

@@ -1057,6 +1057,47 @@ export function registerTools(server: McpServer, context: AulaContext): void {
     },
   );
 
+  // --- Pay4It (Københavns Kommune: Klubkort 0134, Skolemad 0118) -----------
+
+  const childIdsShape = { childIds: z.array(z.number().int().positive()).min(1) } as const;
+
+  server.registerTool(
+    'aula.klubkort.pay4it',
+    {
+      title: 'Klubkort balance (Pay4It)',
+      description:
+        'Club card (Klubkort) balance per child from Pay4It / skolemad-klub.kk.dk: balance, ' +
+        'subsidy (credit) and whether the physical card is linked. Amounts are in DKK.',
+      inputSchema: childIdsShape,
+    },
+    async (args) => {
+      const pay4it = await context.getPay4It();
+      return jsonContent(
+        await pay4it.getKlubkort(await buildIntegrationCtx({ ...args, institutionCodes: [] })),
+      );
+    },
+  );
+
+  server.registerTool(
+    'aula.skolemad.pay4it',
+    {
+      title: 'Skolemad orders (Pay4It)',
+      description:
+        'School meal (Skolemad) orders per child and weekday from Pay4It / skolemad-klub.kk.dk. ' +
+        'Lists only what is ordered, not the menu.',
+      inputSchema: {
+        ...childIdsShape,
+        isoWeek: integrationContextShape.isoWeek,
+      },
+    },
+    async (args) => {
+      const pay4it = await context.getPay4It();
+      return jsonContent(
+        await pay4it.getSkolemad(await buildIntegrationCtx({ ...args, institutionCodes: [] })),
+      );
+    },
+  );
+
   // --- aula.messages.get_thread --------------------------------------------
 
   server.registerTool(

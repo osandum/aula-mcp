@@ -134,6 +134,18 @@ describe('buildDiscoverManifest', () => {
     expect(m.capabilities.huskelisten?.notes).toBeUndefined();
   });
 
+  test('Pay4It widgets (0118, 0134) add skolemad and klubkort capabilities', async () => {
+    const m = await buildDiscoverManifest(fakeContext({ widgets: ['0118', '0134'] }));
+    expect(m.capabilities.skolemad?.tools).toEqual(['aula.skolemad.pay4it']);
+    expect(m.capabilities.klubkort?.tools).toEqual(['aula.klubkort.pay4it']);
+  });
+
+  test('skolemad and klubkort are absent without their widgets', async () => {
+    const m = await buildDiscoverManifest(fakeContext({ widgets: [] }));
+    expect(m.capabilities.skolemad).toBeUndefined();
+    expect(m.capabilities.klubkort).toBeUndefined();
+  });
+
   test('lektier carries a "not detected" note when 0142 absent', async () => {
     const m = await buildDiscoverManifest(fakeContext({ widgets: [] }));
     expect(m.capabilities.lektier?.notes).toContain('0142');

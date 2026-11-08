@@ -398,6 +398,8 @@ describe('MCP server: tools/list', () => {
     expect(names).toContain('aula.opgaver.minuddannelse');
     expect(names).toContain('aula.ugebrev.minuddannelse');
     expect(names).toContain('aula.huskelisten.systematic');
+    expect(names).toContain('aula.klubkort.pay4it');
+    expect(names).toContain('aula.skolemad.pay4it');
     // aula.raw_request is NOT in the list because AULA_MCP_RAW isn't set.
     expect(names).not.toContain('aula.raw_request');
     // aula.presence.set_template is gated the same way behind AULA_MCP_WRITE.
