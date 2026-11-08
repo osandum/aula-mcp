@@ -944,6 +944,109 @@ describe('Pay4ItClient', () => {
     expect(JSON.parse(String(req?.body)).date).toBe('2026-05-04T00:00:00');
   });
 
+  test('getSkolemad with menu logs in via SSO and adds the dish of the day', async () => {
+    const http = new FakeHttp().enqueue(
+      {
+        status: 200,
+        body: JSON.stringify({
+          CanLogin: true,
+          Wallets: [
+            {
+              WalletID: 'W-1',
+              Name: 'Emilie',
+              Dates: { '2026-05-04T00:00:00': ['Lasagne'], '2026-05-05T00:00:00': [] },
+            },
+          ],
+        }),
+      },
+      { status: 302, headers: { location: '/FoodPlannerV3/Index?walletID=W-1&date=2026-05-04' } },
+      { status: 200, body: '<html></html>' },
+      {
+        status: 200,
+        body: JSON.stringify([
+          {
+            WalletID: 'W-1',
+            Customers: [{ FoodPlan: null }, { FoodPlan: { CustomerID: 867, ID: 78 } }],
+          },
+        ]),
+      },
+      {
+        status: 200,
+        body: JSON.stringify({
+          Days: [
+            {
+              Day: 0,
+              IsClosed: false,
+              Products: [
+                { Name: 'Dhal', MasterCaterInfo: { MenuGroup: 'DAT' } },
+                {
+                  Name: 'Lasagne',
+                  RegistrationDeadline: '2026-05-04T08:00:00+02:00',
+                  MasterCaterInfo: { MenuGroup: 'DIS' },
+                },
+              ],
+            },
+            {
+              Day: 1,
+              IsClosed: false,
+              Products: [
+                {
+                  Name: 'Chili con carne',
+                  RegistrationDeadline: '2026-05-05T08:00:00+02:00',
+                  MasterCaterInfo: { MenuGroup: 'DIS' },
+                },
+              ],
+            },
+          ],
+        }),
+      },
+    );
+    const client = new Pay4ItClient({ http: http.asHttpClient(), widgets: fakeWidgets() });
+    const meals = await client.getSkolemad(ctx(), { menu: true });
+    expect(meals.warnings).toBeUndefined();
+    expect(meals.children[0]?.days).toEqual([
+      {
+        date: '2026-05-04',
+        products: ['Lasagne'],
+        mainCourse: 'Lasagne',
+        deadline: '2026-05-04T08:00:00+02:00',
+      },
+      {
+        date: '2026-05-05',
+        products: [],
+        mainCourse: 'Chili con carne',
+        deadline: '2026-05-05T08:00:00+02:00',
+      },
+    ]);
+    const login = new URL(http.requested[1]?.url ?? '');
+    expect(login.pathname).toBe('/aula/login');
+    expect(login.searchParams.get('aulaToken')).toBe('TKN-1');
+    expect(login.searchParams.get('returnUrl')).toBe(
+      '/FoodPlannerV3/Index?walletID=W-1&date=2026-05-04',
+    );
+    expect(http.requested[3]?.headers?.walletid).toBe('W-1');
+    const menu = new URL(http.requested[4]?.url ?? '');
+    expect(menu.searchParams.get('customerID')).toBe('867');
+    expect(menu.searchParams.get('foodPlanID')).toBe('78');
+    expect(menu.searchParams.get('start')).toBe('2026-05-04');
+  });
+
+  test('a rejected SSO login becomes a warning, orders are still returned', async () => {
+    const http = new FakeHttp().enqueue(
+      {
+        status: 200,
+        body: JSON.stringify({
+          Wallets: [{ WalletID: 'W-1', Dates: { '2026-05-04T00:00:00': [] } }],
+        }),
+      },
+      { status: 302, headers: { location: '/account/logout' } },
+    );
+    const client = new Pay4ItClient({ http: http.asHttpClient(), widgets: fakeWidgets() });
+    const meals = await client.getSkolemad(ctx(), { menu: true });
+    expect(meals.children[0]?.days).toEqual([{ date: '2026-05-04', products: [] }]);
+    expect(meals.warnings?.[0]).toContain('menu unavailable');
+  });
+
   test('empty Wallets yields a warning about the userId', async () => {
     const http = new FakeHttp().enqueue({ status: 200, body: '{"CanLogin":true,"Wallets":[]}' });
     const client = new Pay4ItClient({ http: http.asHttpClient(), widgets: fakeWidgets() });

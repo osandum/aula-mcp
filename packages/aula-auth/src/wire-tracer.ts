@@ -130,6 +130,7 @@ const SECRET_BODY_FIELDS_SET = new Set(SECRET_BODY_FIELDS.map((s) => s.toLowerCa
  */
 const SECRET_URL_PARAMS = new Set([
   'access_token',
+  'aulatoken',
   'refresh_token',
   'id_token',
   'code',

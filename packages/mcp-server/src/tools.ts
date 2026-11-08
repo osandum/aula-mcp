@@ -1084,17 +1084,19 @@ export function registerTools(server: McpServer, context: AulaContext): void {
       title: 'Skolemad orders (Pay4It)',
       description:
         'School meal (Skolemad) orders per child and weekday from Pay4It / skolemad-klub.kk.dk. ' +
-        'Lists only what is ordered, not the menu.',
+        "With `menu: true`, each day also carries the menu's dish of the day (mainCourse), " +
+        'its order deadline and whether the kitchen is closed (one extra SSO login to ' +
+        'skolemad-klub.kk.dk).',
       inputSchema: {
         ...childIdsShape,
         isoWeek: integrationContextShape.isoWeek,
+        menu: z.boolean().optional().describe('Include the dish of the day from the menu.'),
       },
     },
     async (args) => {
       const pay4it = await context.getPay4It();
-      return jsonContent(
-        await pay4it.getSkolemad(await buildIntegrationCtx({ ...args, institutionCodes: [] })),
-      );
+      const ctx = await buildIntegrationCtx({ ...args, institutionCodes: [] });
+      return jsonContent(await pay4it.getSkolemad(ctx, { menu: args.menu === true }));
     },
   );
 

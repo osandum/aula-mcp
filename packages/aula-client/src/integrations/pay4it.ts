@@ -14,6 +14,19 @@
  *            Club:   wallets carry WalletBalance / CreditBalance / NFCAdded.
  *            School: wallets carry Dates: { "<YYYY-MM-DD>T00:00:00": [productName] }
  *                    for five days starting at `date` – so pass the Monday.
+ *
+ * The menu (what can be ordered, not just what is ordered) lives on
+ * skolemad-klub.kk.dk itself, behind the same SSO the widget's
+ * "Bestil / Afbestil" button uses:
+ *   GET  /aula/login?return=&aulaToken=…&userProfile=guardian&returnUrl=/FoodPlannerV3/Index?walletID=…
+ *        → session cookies (.AspNet.ApplicationCookie). The returnUrl must carry
+ *          the walletID; without it the site logs straight back out.
+ *   GET  /api/WalletGroup/GetChildCustomerLocations          (header walletid)
+ *        → per wallet: Customers[].FoodPlan { CustomerID, ID }
+ *   GET  /api/FoodPlanner/V3?start=<monday>&foodPlanID=…&customerID=…  (header walletid)
+ *        → Days[{ Day: 0–4, IsClosed, Products[{ Name, RegistrationDeadline,
+ *          MasterCaterInfo.MenuGroup }] }]. MenuGroup "DIS" is the dish of the day
+ *          (hovedret), "DAT" the vegetarian alternative, "PLUS" extras.
  */
 
 import type { AulaHttpClient } from '@aula-mcp/aula-auth';
@@ -24,6 +37,8 @@ import { type IntegrationContext, isoDate, isoWeekToMonday } from './types.ts';
 const PAY4IT_BASE = 'https://kkapi.pay4it.dk/V2/Wallet';
 const KLUBKORT_WIDGET_ID = '0134';
 const SKOLEMAD_WIDGET_ID = '0118';
+const SKOLEMAD_KLUB = 'https://skolemad-klub.kk.dk';
+const MAIN_COURSE_GROUP = 'DIS';
 
 interface Pay4ItWallet {
   ID?: number;
@@ -38,6 +53,29 @@ interface Pay4ItWallet {
 interface Pay4ItResponse {
   CanLogin?: boolean;
   Wallets?: Pay4ItWallet[];
+}
+
+interface FoodPlanLocation {
+  WalletID?: string;
+  Customers?: { FoodPlan?: { CustomerID?: number; ID?: number } | null }[];
+}
+
+interface FoodPlanWeek {
+  Days?: {
+    Day?: number;
+    IsClosed?: boolean;
+    Products?: {
+      Name?: string;
+      RegistrationDeadline?: string;
+      MasterCaterInfo?: { MenuGroup?: string } | null;
+    }[];
+  }[];
+}
+
+interface MenuDay {
+  closed: boolean;
+  mainCourse?: string;
+  deadline?: string;
 }
 
 export interface KlubkortWallet {
@@ -62,6 +100,12 @@ export interface SkolemadDay {
   date: string;
   /** Names of the ordered products; empty when nothing is ordered. */
   products: string[];
+  /** With `menu: true`: the dish of the day (hovedret) on the menu. */
+  mainCourse?: string;
+  /** With `menu: true`: order deadline (ISO, with offset). */
+  deadline?: string;
+  /** With `menu: true`: the kitchen is closed that day. */
+  closed?: boolean;
 }
 
 export interface SkolemadChild {
@@ -122,8 +166,9 @@ export class Pay4ItClient {
     return { wallets, raw: result, ...(warnings.length ? { warnings } : {}) };
   }
 
-  /** Skolemad orders per child and day for `ctx.isoWeek` (Monday–Friday). */
-  async getSkolemad(ctx: IntegrationContext): Promise<Skolemad> {
+  /** Skolemad orders per child and day for `ctx.isoWeek` (Monday–Friday).
+   *  With `menu`, each day also gets the menu's dish of the day and deadline. */
+  async getSkolemad(ctx: IntegrationContext, opts: { menu?: boolean } = {}): Promise<Skolemad> {
     const childs = childFilter(ctx);
     const monday = isoDate(isoWeekToMonday(ctx.isoWeek));
     const result = await this.post(this.skolemadWidgetId, 'AulaSchoolInfoV2', childs, monday);
@@ -138,12 +183,97 @@ export class Pay4ItClient {
       return out;
     });
     const warnings = emptyWarnings(childs, children.length);
+    if (opts.menu) {
+      for (const child of children) {
+        if (!child.walletId) continue;
+        try {
+          const menu = await this.getMenu(child.walletId, monday);
+          for (const day of child.days) {
+            const m = menu.get(day.date);
+            if (!m) continue;
+            if (m.mainCourse) day.mainCourse = m.mainCourse;
+            if (m.deadline) day.deadline = m.deadline;
+            if (m.closed) day.closed = true;
+          }
+        } catch (err) {
+          warnings.push(`Skolemad menu unavailable: ${(err as Error).message}`);
+        }
+      }
+    }
     return {
       isoWeek: ctx.isoWeek,
       children,
       raw: result,
       ...(warnings.length ? { warnings } : {}),
     };
+  }
+
+  /** Menu per date (YYYY-MM-DD) for the week starting `monday`, via the SSO
+   *  session on skolemad-klub.kk.dk. */
+  private async getMenu(walletId: string, monday: string): Promise<Map<string, MenuDay>> {
+    const token = await this.widgets.get(this.skolemadWidgetId);
+    const returnUrl = `/FoodPlannerV3/Index?walletID=${encodeURIComponent(walletId)}&date=${monday}`;
+    let url = `${SKOLEMAD_KLUB}/aula/login?${new URLSearchParams({
+      return: '',
+      aulaToken: token,
+      userProfile: 'guardian',
+      returnUrl,
+    })}`;
+    for (let hop = 0; ; hop++) {
+      const res = await this.http.request(url, { method: 'GET' });
+      const location = res.headers.get('location');
+      if (!location) {
+        if (res.status !== 200) throw new Error(`login failed (status ${res.status})`);
+        break;
+      }
+      url = new URL(location, url).toString();
+      if (/\/account\/logout/i.test(url)) throw new Error('login rejected (redirected to logout)');
+      if (hop >= 5) throw new Error('login: too many redirects');
+    }
+
+    const headers = {
+      walletid: walletId,
+      'x-requested-with': 'XMLHttpRequest',
+      accept: 'application/json',
+    };
+    const locations = await this.getJson<FoodPlanLocation[]>(
+      `${SKOLEMAD_KLUB}/api/WalletGroup/GetChildCustomerLocations`,
+      headers,
+    );
+    const location = locations.find((l) => l.WalletID === walletId) ?? locations[0];
+    const plan = location?.Customers?.find((c) => c.FoodPlan)?.FoodPlan;
+    if (plan?.ID === undefined || plan.CustomerID === undefined)
+      throw new Error('no food plan for the wallet');
+    const week = await this.getJson<FoodPlanWeek>(
+      `${SKOLEMAD_KLUB}/api/FoodPlanner/V3?${new URLSearchParams({
+        start: monday,
+        foodPlanID: String(plan.ID),
+        customerID: String(plan.CustomerID),
+      })}`,
+      headers,
+    );
+
+    const start = new Date(`${monday}T00:00:00Z`);
+    const menu = new Map<string, MenuDay>();
+    for (const d of week.Days ?? []) {
+      if (d.Day === undefined) continue;
+      const date = isoDate(new Date(start.getTime() + d.Day * 86_400_000));
+      const main = (d.Products ?? []).find(
+        (p) => p.MasterCaterInfo?.MenuGroup === MAIN_COURSE_GROUP,
+      );
+      const day: MenuDay = { closed: d.IsClosed === true };
+      if (main?.Name) day.mainCourse = main.Name;
+      if (main?.RegistrationDeadline) day.deadline = main.RegistrationDeadline;
+      menu.set(date, day);
+    }
+    return menu;
+  }
+
+  private async getJson<T>(url: string, headers: Record<string, string>): Promise<T> {
+    const res = await this.http.request(url, { method: 'GET', headers });
+    if (res.status !== 200)
+      throw new Error(`${new URL(url).pathname} failed (status ${res.status})`);
+    return JSON.parse(res.body) as T;
   }
 
   private async post(
